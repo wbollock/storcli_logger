@@ -22,15 +22,13 @@ type RaidLog struct {
 }
 
 // this program should run forever and do:
-// 1. convert storcli event output to logfmt or json
-// 2. poll storcli for new events since last run
-// 3. if new events, write that specific event(s) to the log file
-// 4. ship with logrotation config
-// 5. periodically wipe the storcli event log
+// 4. ship with logrotation config, systemd service
+// 5. periodically wipe the storcli event log(?)
+// maybe that should be cron actually
 // also need config file with like, storcli file location maybe? or just read from /etc/default/storcli_logger ?
 
 // maybe use type=latest=N here?
-func convertStorcliOutput(storcliPath string, raidGroup string, latest int) {
+func convertStorcliOutput(storcliPath string, raidGroup string, logPath string, latest int) {
 
 	// e.g storcli /c0 show events type=latest=5
 	// gets last 5 events
@@ -88,6 +86,15 @@ func convertStorcliOutput(storcliPath string, raidGroup string, latest int) {
 		}
 	}
 
+	// TODO: probably switch to Open() and Close() instead
+	// technically don't need to close file as the Go GC closes it for us?
+	// https://stackoverflow.com/a/62986463
+	file, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE, 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.SetOutput(file)
+
 	for _, raid := range raidlogs {
 		log.WithFields(log.Fields{
 			"SeqNum":            raid.SeqNum,
@@ -98,9 +105,9 @@ func convertStorcliOutput(storcliPath string, raidGroup string, latest int) {
 			"Event Description": raid.Description,
 			"Event Data":        raid.Data,
 		}).Info()
-
 	}
-
+	// reset to Stdout for log_shipper specific logs
+	log.SetOutput(os.Stdout)
 }
 
 func getMaxEvents(storcliPath string, raidGroup string) (latest int) {
@@ -118,30 +125,30 @@ func main() {
 	var (
 		storcliPath = flag.String("storcli.path", "/usr/sbin/storcli",
 			"Storcli Binary Path")
-		raidGroup = flag.String("raidgroup", "/c0",
+		raidGroup = flag.String("raidgroup", "/cALL",
 			"Storcli raid group (/cx)")
 		logPath = flag.String("log.path", "/var/log/storcli.log",
 			"Desired path to log to")
 	)
 
-	f, err := os.OpenFile(*logPath, os.O_WRONLY|os.O_CREATE, 0755)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.SetOutput(f)
-
 	// on program first start or restart
-	max := getMaxEvents(*storcliPath, *raidGroup)
-	convertStorcliOutput(*storcliPath, *raidGroup, max)
+	startingMax := getMaxEvents(*storcliPath, *raidGroup)
+	convertStorcliOutput(*storcliPath, *raidGroup, *logPath, startingMax)
 	var latest, newMax int
+	latest = startingMax
 	for {
-		latest = max
-		if latest != 0 {
-			convertStorcliOutput(*storcliPath, *raidGroup, latest)
+		if latest > 0 {
+			log.WithFields(log.Fields{
+				"entries": latest,
+			}).Info("Beginning convertStorcliOutput output for latest entries", latest)
+			convertStorcliOutput(*storcliPath, *raidGroup, *logPath, latest)
 		}
 		// we only want to get events that are new since our last run
 		newMax = getMaxEvents(*storcliPath, *raidGroup)
-		max = newMax - max
+		latest = newMax - startingMax
+		log.WithFields(log.Fields{
+			"entries": latest,
+		}).Info("Latest event log entries")
 		time.Sleep(20 * time.Second)
 	}
 }
